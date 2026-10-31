@@ -6,6 +6,7 @@ INSTALL_DIR="/opt/slyber_turn"
 BIN_PATH="${INSTALL_DIR}/slyber_turn"
 SYMLINK_PATH="/usr/local/bin/slyber_turn"
 SERVICE_FILE="/etc/systemd/system/slyber_turn.service"
+SERVICE_USER="slyber_turn"
 VERSION="${VERSION:-latest}"
 
 if [ "$(id -u)" -ne 0 ]; then
@@ -52,7 +53,7 @@ if curl -fsSL "${RELEASE_BASE}/${BIN_FILENAME}" -o "${TMP_DIR}/${BIN_FILENAME}" 
 elif curl -fsSL "${RAW_FALLBACK_BASE}/${BIN_FILENAME}" -o "${TMP_DIR}/${BIN_FILENAME}" 2>/dev/null; then
     DOWNLOAD_SOURCE="${RAW_FALLBACK_BASE}"
 else
-    echo "[ERR] Failed to download ${BIN_FILENAME} from ${REPO}." >&2
+    echo "[ERR] Failed to download ${BIN_FILENAME} from${REPO}." >&2
     exit 1
 fi
 
@@ -67,12 +68,27 @@ fi
 
 timedatectl set-ntp true 2>/dev/null || true
 
+sysctl -w net.core.rmem_max=8388608 >/dev/null 2>&1 || true
+sysctl -w net.core.wmem_max=8388608 >/dev/null 2>&1 || true
+printf "net.core.rmem_max=8388608\nnet.core.wmem_max=8388608\n" > /etc/sysctl.d/99-slyber-turn.conf 2>/dev/null || true
+
+if ! id -u "${SERVICE_USER}" >/dev/null 2>&1; then
+    NOLOGIN_SHELL="/usr/sbin/nologin"
+    if [ ! -x "${NOLOGIN_SHELL}" ] && [ -x "/sbin/nologin" ]; then
+        NOLOGIN_SHELL="/sbin/nologin"
+    elif [ ! -x "${NOLOGIN_SHELL}" ]; then
+        NOLOGIN_SHELL="/bin/false"
+    fi
+    useradd --system --no-create-home --home-dir "${INSTALL_DIR}" --shell "${NOLOGIN_SHELL}" "${SERVICE_USER}"
+    echo "[OK] Created dedicated system user: ${SERVICE_USER}"
+fi
+
 mkdir -p "${INSTALL_DIR}/certs"
-chmod 755 "${INSTALL_DIR}"
+chmod 750 "${INSTALL_DIR}"
 
 install -m 0755 "${TMP_DIR}/${BIN_FILENAME}" "${BIN_PATH}"
 ln -sf "${BIN_PATH}" "${SYMLINK_PATH}"
-echo "[OK] Installed binary to ${BIN_PATH} (symlinked to ${SYMLINK_PATH})"
+echo "[OK] Installed binary to ${BIN_PATH} (symlinked to${SYMLINK_PATH})"
 
 if [ ! -f "${INSTALL_DIR}/.env" ]; then
     GENERATED_SECRET="${TURN_SECRET:-$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' | head -c 32)}"
@@ -113,6 +129,8 @@ else
     echo "[INFO] Existing configuration found at ${INSTALL_DIR}/.env (preserved)"
 fi
 
+chown -R "${SERVICE_USER}:${SERVICE_USER}" "${INSTALL_DIR}"
+
 if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
     echo "[INFO] Applying UFW firewall rules..."
     ufw allow 3478/udp >/dev/null 2>&1 || true
@@ -136,12 +154,16 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
 WorkingDirectory=${INSTALL_DIR}
 EnvironmentFile=${INSTALL_DIR}/.env
 ExecStart=${BIN_PATH} server
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
 
 [Install]
 WantedBy=multi-user.target
@@ -159,7 +181,7 @@ echo "[INFO] Running self-diagnostics..."
 CURRENT_SECRET="$(grep '^TURN_SECRET=' "${INSTALL_DIR}/.env" | cut -d= -f2- | tr -d '"')"
 echo ""
 echo "[OK] Slyber Turn Server is installed and running."
-echo "  Service     : systemctl status slyber_turn"
+echo "  Service     : systemctl status slyber_turn (user: ${SERVICE_USER})"
 echo "  Config file : ${INSTALL_DIR}/.env"
 echo "  TURN Secret : ${CURRENT_SECRET}"
 echo "  Diagnostics : sudo slyber_turn doctor"
